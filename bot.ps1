@@ -189,13 +189,28 @@ function Start-TriggerBot {
                 $gameEntitySystemPtr = ReadMemoryPS $processHandle ($clientDllBase + $Offsets.dwGameEntitySystem) ([IntPtr]) "dwGameEntitySystem"
 
                 if ($gameEntitySystemPtr -eq [IntPtr]::Zero) {
-                    # Write-Host "[TriggerBot] DEBUG ERROR: dwGameEntitySystem pointer is invalid (0x$(([IntPtr]($clientDllBase.ToInt64() + $Offsets.dwGameEntitySystem)).ToInt64().ToString('X'))). Cannot resolve entity." -ForegroundColor Red
+                    Write-Host "[TriggerBot] DEBUG ERROR: dwGameEntitySystem pointer is invalid. Cannot resolve entity." -ForegroundColor Red
                     Start-Sleep -Milliseconds 10
                     continue
                 }
 
-                $entityEntryPtr = ReadMemoryPS $processHandle ([IntPtr]($gameEntitySystemPtr.ToInt64() + (($crosshairEntityId -shr 9) * 0x8) + 0x10)) ([IntPtr]) "entityEntryPtr_base"
-                $entityPtr = ReadMemoryPS $processHandle ([IntPtr]($entityEntryPtr.ToInt64() + (($crosshairEntityId -band 0x1FF) * 0x78))) ([IntPtr]) "entityPtr_final"
+                # Explicitly cast to Int64 for intermediate calculations to prevent overflow
+                $shf_9_mult_8 = ([Int64]$crosshairEntityId -shr 9) * 0x8
+                $band_1FF_mult_78 = ([Int64]$crosshairEntityId -band 0x1FF) * 0x78
+
+                # Calculate entity entry pointer
+                $entityEntryAddress = [IntPtr]($gameEntitySystemPtr.ToInt64() + $shf_9_mult_8 + 0x10)
+                $entityEntryPtr = ReadMemoryPS $processHandle $entityEntryAddress ([IntPtr]) "entityEntryPtr_base"
+
+                if ($entityEntryPtr -eq [IntPtr]::Zero) {
+                    Write-Host "[TriggerBot] DEBUG ERROR: entityEntryPtr is invalid. Cannot resolve entity." -ForegroundColor Red
+                    Start-Sleep -Milliseconds 10
+                    continue
+                }
+
+                # Calculate final entity pointer
+                $entityAddress = [IntPtr]($entityEntryPtr.ToInt64() + $band_1FF_mult_78)
+                $entityPtr = ReadMemoryPS $processHandle $entityAddress ([IntPtr]) "entityPtr_final"
 
                 if ($entityPtr -ne [IntPtr]::Zero) {
                     # Read entity's team number
