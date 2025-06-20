@@ -79,7 +79,7 @@ $PROCESS_VM_READ = 0x0010 # Required to read memory
 
 # Virtual Key Codes
 $VK_XBUTTON1 = 0x05 # Mouse Button 4 (Activation key)
-$VK_END      = 0x23 # END key (Exit key)
+$VK_END       = 0x23 # END key (Exit key)
 
 # Game Offsets (YOU MUST UPDATE THESE FOR THE CURRENT GAME VERSION)
 # These are taken directly from your provided C# TriggerBot.cs
@@ -259,17 +259,4 @@ function Start-TriggerBot {
 
     # Cleanup: Close the process handle when the bot exits
     if ($processHandle -ne [IntPtr]::Zero) {
-        [WinAPI]::CloseHandle($processHandle) | Out-Null # Use Out-Null to suppress boolean output
-        Write-Host "[TriggerBot] Process handle closed. Exiting." -ForegroundColor Cyan
-    }
-}
-
-# Set console title
-$Host.UI.RawUI.WindowTitle = "CS2 Bots Launcher - Trigger Bot (PowerShell)"
-Write-Host "Starting CS2 Trigger Bot Launcher (PowerShell)..." -ForegroundColor White
-Write-Host "------------------------------------------" -ForegroundColor White
-
-# Start the trigger bot
-Start-TriggerBot
-
-Write-Host "`n'END' key pressed. Exiting Trigger Bot." -ForegroundColor Cyan
+        [WinAPI]::CloseHandle($processHandle) | Out-N
