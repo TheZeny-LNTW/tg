@@ -210,7 +210,7 @@ function Start-TriggerBot {
 
             # Perform attack based on shouldFire flag
             if ($shouldFire) {
-                SimulateLeftClick() # Use mouse_event for clicking
+                SimulateLeftClick # Corrected: Removed parentheses for PowerShell function call
                 Start-Sleep -Milliseconds 50 # Small delay to prevent too many rapid clicks
             }
         }
@@ -238,4 +238,3 @@ Write-Host "------------------------------------------" -ForegroundColor White
 Start-TriggerBot
 
 Write-Host "`n'END' key pressed. Exiting Trigger Bot." -ForegroundColor Cyan
-
