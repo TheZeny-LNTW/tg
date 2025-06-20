@@ -1,8 +1,8 @@
 # This PowerShell script replicates the functionality of the C# TriggerBot.cs
 # and the relevant parts of Program.cs for launching the Trigger Bot.
 #
-# This version downloads and loads 'cheat.dll' from the GitHub repository at runtime
-# for self-contained execution, resolving the FileNotFoundException.
+# This version embeds the C# functionality directly into the script for self-contained execution.
+# The problematic Console.WriteLine in the embedded C# has been removed to prevent compilation errors.
 #
 # IMPORTANT: Game offsets change frequently with game updates. You MUST update the offsets
 # to match the current game version. Using outdated offsets will lead to incorrect behavior or crashes.
@@ -11,31 +11,62 @@
 # is against most game's terms of service and can lead to permanent account bans.
 # Use at your own risk and responsibility.
 
-#region Load External C# DLL from GitHub
-# Define the raw URL for cheat.dll in your GitHub repository
-$DllGitHubRawUrl = "https://raw.githubusercontent.com/TheZeny-LNTW/tg/main/cheat.dll"
-$TempDllPath = Join-Path $env:TEMP "cheat.dll"
+#region WinAPI Imports and Helper Functions (Embedded C#)
+# We embed C# code to use WinAPI functions directly, as PowerShell doesn't have native
+# equivalents for low-level memory operations or direct P/Invoke without this.
+Add-Type -TypeDefinition @"
+    using System;
+    using System.Diagnostics;
+    using System.Runtime.InteropServices;
 
-Write-Host "[TriggerBot] Attempting to download cheat.dll from GitHub..." -ForegroundColor Yellow
+    public class WinAPI
+    {
+        // Used to send mouse input events.
+        [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
+        public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);
 
-try {
-    # Download the DLL to a temporary path
-    Invoke-RestMethod -Uri $DllGitHubRawUrl -OutFile $TempDllPath
-    Write-Host "[TriggerBot] cheat.dll downloaded to: $($TempDllPath)" -ForegroundColor Green
+        // Used to open a process with specific access rights.
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 
-    # Load the DLL from the temporary path
-    Add-Type -LiteralPath $TempDllPath
-    Write-Host "[TriggerBot] cheat.dll loaded successfully." -ForegroundColor Green
+        // Used to read memory from a process.
+        [DllImport("kernel32.dll")]
+        public static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, [Out] byte[] lpBuffer, int dwSize, out int lpNumberOfBytesRead);
 
-    # Clean up the temporary DLL file after loading (optional, but good practice)
-    # Remove-Item $TempDllPath -ErrorAction SilentlyContinue
+        // Used to close an opened process handle.
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseHandle(IntPtr hObject);
 
-} catch {
-    Write-Host "[TriggerBot] ERROR: Failed to download or load cheat.dll." -ForegroundColor Red
-    Write-Host "[TriggerBot] Please ensure 'cheat.dll' exists at '$DllGitHubRawUrl'." -ForegroundColor Red
-    Write-Host "[TriggerBot] Error Details: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1 # Exit the script if DLL cannot be loaded
-}
+        // Used to get the asynchronous key state.
+        // This allows checking if a key is currently pressed, even if the application is not in focus.
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int vKey);
+
+        // Generic ReadMemory function using Marshal
+        public static T ReadMemory<T>(IntPtr hProcess, IntPtr address, string debugTag = "") where T : struct
+        {
+            int size = Marshal.SizeOf(typeof(T));
+            byte[] buffer = new byte[size];
+            int bytesRead;
+
+            if (ReadProcessMemory(hProcess, address, buffer, size, out bytesRead) && bytesRead == size)
+            {
+                GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+                T data = (T)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(T));
+                handle.Free();
+                return data;
+            }
+            else
+            {
+                // Removed Console.WriteLine from C# block to prevent Add-Type compilation issues.
+                // Debugging output will be handled by PowerShell's ReadMemoryPS wrapper.
+                return default(T);
+            }
+        }
+    }
+"@ -Language CSharp
+
 #endregion
 
 #region Global Constants and Offsets
@@ -75,21 +106,37 @@ $DebugMode = $true # Set to $true to enable verbose debugging output
 #region Helper Functions (PowerShell Wrappers)
 
 function IsKeyPressed($vKey) {
-    # Check if a virtual key is pressed using the imported GetAsyncKeyState from WinAPI class in cheat.dll
+    # Check if a virtual key is pressed using the imported GetAsyncKeyState from WinAPI class.
     return (([int]([WinAPI]::GetAsyncKeyState($vKey))) -band 0x8000) -ne 0
 }
 
 function SimulateLeftClick() {
-    # Simulate a left mouse click using the imported mouse_event from WinAPI class in cheat.dll
+    # Simulate a left mouse click using the imported mouse_event from WinAPI class.
     [WinAPI]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
     Start-Sleep -Milliseconds 10
     [WinAPI]::mouse_event($MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 }
 
 function ReadMemoryPS([IntPtr]$hProcess, [IntPtr]$address, [Type]$type, [string]$debugTag = "") {
-    # Wrapper function to call the C# ReadMemory generic method from WinAPI class in cheat.dll
+    # Wrapper function to call the C# ReadMemory generic method.
     # It converts the type to a generic type parameter suitable for the C# method.
-    return [WinAPI]::ReadMemory([System.Object].GetType().GetMethod("ReadMemory").MakeGenericMethod($type)).Invoke($null, @($hProcess, $address, $debugTag))
+    # We now handle error logging for ReadMemory failures directly in PowerShell.
+    $result = [WinAPI]::ReadMemory([System.Object].GetType().GetMethod("ReadMemory").MakeGenericMethod($type)).Invoke($null, @($hProcess, $address, $debugTag))
+
+    # Check if the result is the default value (indicating a read failure in C#)
+    if ($result -eq $null -or $result -eq [System.Activator]::CreateInstance($type)) {
+        if ($DebugMode -and -not $global:HasLoggedMemoryReadError) {
+            # Log this error only once to avoid spamming, unless it's a new type of error.
+            Write-Host "[TriggerBot] DEBUG WARNING: ReadMemory failed for '$debugTag' at 0x$($address.ToInt64().ToString('X')). This might indicate outdated offsets or permission issues." -ForegroundColor Yellow
+            # To re-enable this warning on subsequent failures, uncomment the line below:
+            # $global:HasLoggedMemoryReadError = $false
+            $global:HasLoggedMemoryReadError = $true # Set flag to true after logging
+        }
+        return default($type) # Return default value to propagate the failure
+    } else {
+        $global:HasLoggedMemoryReadError = $false # Reset flag if a successful read occurs
+    }
+    return $result
 }
 
 #endregion
@@ -129,6 +176,9 @@ function Start-TriggerBot {
 
     Write-Host "[TriggerBot] Active. Hold MOUSE4 to enable. Press 'END' to exit." -ForegroundColor Green
 
+    # Initialize a flag to prevent spamming warnings about memory read failures
+    $global:HasLoggedMemoryReadError = $false
+
     # Main bot loop
     while (!(IsKeyPressed $VK_END)) { # Check if END key is pressed to exit
         # Only proceed with trigger logic if MOUSE4 is pressed.
@@ -141,23 +191,26 @@ function Start-TriggerBot {
             # Read local player's pawn address
             $localPlayerPawnPtr = ReadMemoryPS $processHandle ($clientDllBase + $Offsets.dwLocalPlayerPawn) ([IntPtr]) "dwLocalPlayerPawn"
             if ($localPlayerPawnPtr -eq [IntPtr]::Zero) {
-                Write-Host "[TriggerBot] Local player pawn not found. Are you in-game? (dwLocalPlayerPawn might be outdated)" -ForegroundColor Yellow
-                Start-Sleep -Milliseconds 10 # Shorter sleep as it's an in-game check
+                # Error message already handled by ReadMemoryPS, just continue loop
+                Start-Sleep -Milliseconds 10
                 continue
             }
             if ($DebugMode) { Write-Host "[Debug] localPlayerPawnPtr: 0x$($localPlayerPawnPtr.ToInt64().ToString('X'))" }
 
             # Read local player's team number
             $localPlayerTeam = ReadMemoryPS $processHandle ($localPlayerPawnPtr + $Offsets.m_iTeamNum) ([int]) "localPlayerTeam"
+            # No explicit check needed here, ReadMemoryPS handles default if failed
             if ($DebugMode) { Write-Host "[Debug] localPlayerTeam: $($localPlayerTeam)" }
 
             # Read the ID of the entity currently in the crosshair
             $crosshairEntityId = ReadMemoryPS $processHandle ($localPlayerPawnPtr + $Offsets.m_iCrosshairTarget) ([int]) "m_iCrosshairTarget"
+            # No explicit check needed here, ReadMemoryPS handles default if failed
             if ($DebugMode) { Write-Host "[Debug] crosshairEntityId: $($crosshairEntityId)" }
 
             $shouldFire = $false
 
             # Validate crosshairEntityId. Using broader range 1 to 1023.
+            # If crosshairEntityId is 0 (default if read failed), this condition also handles it.
             if ($crosshairEntityId -gt 0 -and $crosshairEntityId -lt 1024) {
                 # IMPROVED ENTITY POINTER RESOLUTION LOGIC (from your C# code)
                 $gameEntitySystemPtr = ReadMemoryPS $processHandle ($clientDllBase + $Offsets.dwGameEntitySystem) ([IntPtr]) "dwGameEntitySystem"
@@ -184,7 +237,7 @@ function Start-TriggerBot {
                 $entityEntryPtr = ReadMemoryPS $processHandle $entityEntryAddress ([IntPtr]) "entityEntryPtr_base"
 
                 if ($entityEntryPtr -eq [IntPtr]::Zero) {
-                    Write-Host "[TriggerBot] DEBUG ERROR: entityEntryPtr is invalid. Cannot resolve entity." -ForegroundColor Red
+                    # Error message already handled by ReadMemoryPS, just continue loop
                     Start-Sleep -Milliseconds 10
                     continue
                 }
