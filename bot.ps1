@@ -57,11 +57,8 @@ Add-Type -TypeDefinition @"
             else
             {
                 int errorCode = Marshal.GetLastWin32Error();
-                // Optionally print debug info, but keep it quiet for speed in main loop
-                // if (!string.IsNullOrEmpty(debugTag))
-                // {
-                //     Console.WriteLine($"[PS-TriggerBot] DEBUG ERROR: Failed to read memory at 0x{address.ToInt64():X} for '{debugTag}'. Bytes read: {bytesRead}/{size}. Win32 Error: {errorCode}");
-                // }
+                // This debug line is now enabled to get granular error info from C#
+                Console.WriteLine($"[TriggerBot] DEBUG ERROR: Failed to read memory at 0x{address.ToInt64():X} for '{debugTag}'. Bytes read: {bytesRead}/{size}. Win32 Error: {errorCode}");
                 return default(T);
             }
         }
