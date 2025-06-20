@@ -203,7 +203,7 @@ function Start-TriggerBot {
 
                     # Trigger logic: Only shoot if it's an enemy
                     if ($entityTeam -ne $localPlayerTeam) {
-                        $shouldFire = $true
+                        $shouldFire = true
                     }
                 }
             }
