@@ -1,245 +1,295 @@
-# This PowerShell script is designed to perform a true DLL injection
-# of 'cheat.dll' into the Counter-Strike 2 (cs2.exe) process.
-# This script does NOT contain any cheat logic itself; all cheat functionality
-# is expected to be within the 'cheat.dll' file that gets injected.
+# This PowerShell script integrates the functionality of TriggerBot and Bhop
+# directly using embedded C# code via Add-Type.
+# It does NOT use external DLLs like cheat.dll.
 #
-# IMPORTANT: This script requires 'cheat.dll' to be present in your GitHub repository.
-# Ensure the DLL is compatible with the current version of CS2.
-# Using DLL injection is against game terms of service and can lead to permanent bans.
+# IMPORTANT: Game offsets change frequently with game updates. You MUST update the offsets
+# to match the current game version. Using outdated offsets will lead to incorrect behavior or crashes.
+#
+# This code is provided for educational purposes ONLY. Using such tools in online games
+# is against most game's terms of service and can lead to permanent account bans.
 # Use at your own risk and responsibility.
 
 #region Global Constants
-private const int VK_END = 0x23; # Virtual Key Code for the END key (to exit the script)
+private const int VK_END = 0x23;      # Virtual Key Code for the END key (to exit all bots)
+private const int VK_XBUTTON1 = 0x05; # Virtual Key Code for Mouse Button 4 (TriggerBot activation)
+private const int VK_SPACE = 0x20;    # Virtual Key Code for Spacebar (Bhop activation)
 
-# Process Access Rights (for OpenProcess)
-private const int PROCESS_CREATE_THREAD = 0x0002;
-private const int PROCESS_QUERY_INFORMATION = 0x0400;
-private const int PROCESS_VM_OPERATION = 0x0008;
-private const int PROCESS_VM_WRITE = 0x0020;
-private const int PROCESS_VM_READ = 0x0010;
-private const int PROCESS_ALL_ACCESS = 0x1F0FFF; # Broad access for easier injection
+# Process Access Rights
+private const int PROCESS_VM_READ = 0x0010;  # Required to read memory
+private const int PROCESS_VM_WRITE = 0x0020; # Required to write memory (for Bhop)
+private const int PROCESS_VM_OPERATION = 0x0008; # Required for general operations (for Bhop)
+private const int PROCESS_ALL_ACCESS = 0x1F0FFF; # Broad access for OpenProcess (if needed)
 
-# Memory Allocation Types (for VirtualAllocEx)
-private const int MEM_COMMIT = 0x1000;
-private const int MEM_RESERVE = 0x2000;
-
-# Memory Protection Constants (for VirtualAllocEx)
-private const int PAGE_READWRITE = 0x04;
-
-# CreateRemoteThread constants
-private const int CREATE_SUSPENDED = 0x00000004;
-private const int THREAD_WAIT_FOR_INPUT_IDLE = 0x00000004; # Optional, for WaitForSingleObject
-private const int INFINITE = -1; # For WaitForSingleObject timeout
+# Bhop specific constants
+private const int ON_GROUND_FLAG = 1; # (1 << 0) indicates being on ground for player flags
+private const int JUMP_ON = 65537;    # Value to write to dwForceJump to initiate jump
+private const int JUMP_OFF = 256;     # Value to write to dwForceJump to stop jump (or revert)
 
 #endregion
 
-#region WinAPI Imports (for DLL Injection)
-# These are the crucial functions needed for DLL Injection.
+#region Embedded C# (WinAPI Imports and Helper Methods, Game Offsets)
 Add-Type -TypeDefinition @"
     using System;
+    using System.Diagnostics;
     using System.Runtime.InteropServices;
-    using System.Text;
+    using System.Text; // For Encoding if needed, though not directly used in this C# block for string conversion for injection
 
-    public class InjectorWinAPI
+    // Public class for all WinAPI imports and common helper memory functions
+    public class WinAPIAndHelpers
     {
-        // For opening a process to get a handle with necessary rights
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern IntPtr OpenProcess(
-            int dwDesiredAccess,
-            bool bInheritHandle,
-            int dwProcessId
-        );
+        // --- WinAPI Imports (from Program.cs, Triggerbot.cs, Bhop.cs) ---
+        [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
+        public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);
 
-        // For allocating memory in the target process
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern IntPtr VirtualAllocEx(
-            IntPtr hProcess,
-            IntPtr lpAddress,
-            uint dwSize,
-            uint flAllocationType,
-            uint flProtect
-        );
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 
-        // For writing data to the target process's memory
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool WriteProcessMemory(
-            IntPtr hProcess,
-            IntPtr lpBaseAddress,
-            byte[] lpBuffer,
-            uint nSize,
-            out UIntPtr lpNumberOfBytesWritten
-        );
+        [DllImport("kernel32.dll")]
+        public static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, [Out] byte[] lpBuffer, int dwSize, out int lpNumberOfBytesRead);
 
-        // For getting a module handle (e.g., kernel32.dll) in the current process
-        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
-        public static extern IntPtr GetModuleHandleA(string lpModuleName);
+        [DllImport("kernel32.dll")]
+        public static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, [In] byte[] lpBuffer, int dwSize, out int lpNumberOfBytesWritten);
 
-        // For getting the address of an exported function from a module
-        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
-        public static extern IntPtr GetProcAddress(
-            IntPtr hModule,
-            string lpProcName
-        );
-
-        // For creating a new thread in the target process
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern IntPtr CreateRemoteThread(
-            IntPtr hProcess,
-            IntPtr lpThreadAttributes,
-            uint dwStackSize,
-            IntPtr lpStartAddress,
-            IntPtr lpParameter,
-            uint dwCreationFlags,
-            out IntPtr lpThreadId
-        );
-
-        // For waiting for a thread to terminate
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern uint WaitForSingleObject(
-            IntPtr hHandle,
-            uint dwMilliseconds
-        );
-
-        // For freeing memory in the target process
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool VirtualFreeEx(
-            IntPtr hProcess,
-            IntPtr lpAddress,
-            uint dwSize,
-            uint dwFreeType
-        );
-
-        // For closing process/thread handles
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool CloseHandle(IntPtr hObject);
 
-        // For checking key states (for the END key exit)
         [DllImport("user32.dll")]
         public static extern short GetAsyncKeyState(int vKey);
+
+        // --- Helper Methods ---
+        // Generic ReadMemory function using Marshal
+        public static T ReadMemory<T>(IntPtr hProcess, IntPtr address, string debugTag = "") where T : struct
+        {
+            int size = Marshal.SizeOf(typeof(T));
+            byte[] buffer = new byte[size];
+            int bytesRead;
+
+            if (ReadProcessMemory(hProcess, address, buffer, size, out bytesRead) && bytesRead == size)
+            {
+                GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+                T data = (T)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(T));
+                handle.Free();
+                return data;
+            }
+            else
+            {
+                // Return default(T) on failure; PowerShell wrapper will handle logging
+                return default(T);
+            }
+        }
+
+        // Generic WriteMemory function using Marshal
+        public static bool WriteMemory<T>(IntPtr hProcess, IntPtr address, T value, string debugTag = "") where T : struct
+        {
+            int size = Marshal.SizeOf(typeof(T));
+            byte[] buffer = new byte[size];
+
+            GCHandle handle = GCHandle.Alloc(value, GCHandleType.Pinned);
+            Marshal.Copy(handle.AddrOfPinnedObject(), buffer, 0, size);
+            handle.Free();
+
+            int bytesWritten;
+            bool success = WriteProcessMemory(hProcess, address, buffer, size, out bytesWritten);
+
+            return success && bytesWritten == size; // Return success status
+        }
+
+        // Simulates a left mouse click (down and up) using mouse_event
+        public static void SimulateLeftClick()
+        {
+            mouse_event(0x02, 0, 0, 0, 0); // MOUSEEVENTF_LEFTDOWN
+            System.Threading.Thread.Sleep(10);
+            mouse_event(0x04, 0, 0, 0, 0);   // MOUSEEVENTF_LEFTUP
+        }
+    }
+
+    // --- Game Offsets (Defined as a static class for easy access and type safety) ---
+    public static class GameOffsets
+    {
+        // User-provided offsets (YOU MUST UPDATE THESE FOR THE CURRENT GAME VERSION)
+        public static int dwLocalPlayerPawn = 0x18560D0;
+        public static int dwEntityList = 0x1A020A8;
+        public static int dwGameEntitySystem = 0x1B25BD8;
+
+        public static int m_iTeamNum = 0x3E3;
+        public static int m_iHealth = 0x344;
+        public static int m_entitySpottedState = 0x1630;
+        public static int bSpotted = 0x8; // Offset within m_entitySpottedState structure
+
+        public static int m_iCrosshairTarget = 0x1458;
+
+        public static int m_fFlags = 0x3EC; // Player Flags (for Bhop)
+        public static int dwForceJump = 0x184EE00; // Force Jump offset (for Bhop)
     }
 "@ -Language CSharp
 
-function IsKeyPressed($vKey) {
-    # Checks if a virtual key is currently pressed.
-    return (([int]([InjectorWinAPI]::GetAsyncKeyState($vKey))) -band 0x8000) -ne 0
+#endregion
+
+#region PowerShell Helper Functions
+
+# Initialize a flag to prevent spamming warnings about memory read failures
+$global:HasLoggedMemoryReadError = $false
+
+function IsKeyPressedPS($vKey) {
+    # Checks if a virtual key is currently pressed using the C# helper.
+    return (([int]([WinAPIAndHelpers]::GetAsyncKeyState($vKey))) -band 0x8000) -ne 0
+}
+
+function SimulateLeftClickPS() {
+    # Simulates a left mouse click using the C# helper.
+    [WinAPIAndHelpers]::SimulateLeftClick()
+}
+
+function ReadMemoryPS([IntPtr]$hProcess, [IntPtr]$address, [Type]$type, [string]$debugTag = "") {
+    # Wrapper function to call the C# ReadMemory generic method.
+    $result = [WinAPIAndHelpers]::ReadMemory([System.Object].GetType().GetMethod("ReadMemory").MakeGenericMethod($type)).Invoke($null, @($hProcess, $address, $debugTag))
+
+    # Check if the result is the default value (indicating a read failure in C#)
+    if ($result -eq $null -or $result -eq [System.Activator]::CreateInstance($type)) {
+        if ($DebugMode -and -not $global:HasLoggedMemoryReadError) {
+            Write-Host "[Bots] DEBUG WARNING: ReadMemory failed for '$debugTag' at 0x$($address.ToInt64().ToString('X')). This might indicate outdated offsets or permission issues." -ForegroundColor Yellow
+            $global:HasLoggedMemoryReadError = $true # Set flag to true after logging
+        }
+        return $result # Return default value to propagate the failure
+    } else {
+        $global:HasLoggedMemoryReadError = $false # Reset flag if a successful read occurs
+    }
+    return $result
+}
+
+function WriteMemoryPS([IntPtr]$hProcess, [IntPtr]$address, [object]$value, [string]$debugTag = "") {
+    # Wrapper function to call the C# WriteMemory generic method.
+    # Dynamically determine the type for the generic method
+    $type = $value.GetType()
+    $success = [WinAPIAndHelpers]::WriteMemory([System.Object].GetType().GetMethod("WriteMemory").MakeGenericMethod($type)).Invoke($null, @($hProcess, $address, $value, $debugTag))
+
+    if (!$success -and $DebugMode) {
+        Write-Host "[Bots] DEBUG WARNING: WriteMemory failed for '$debugTag' at 0x$($address.ToInt64().ToString('X')). Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Yellow
+    }
+    return $success
 }
 
 #endregion
 
-#region Main DLL Injection Logic
-function Start-DLLInjector {
-    Write-Host "[DLL Injector] Szukam procesu CS2..." -ForegroundColor Cyan
+#region Main Bots Logic
 
-    $process = Get-Process -Name "cs2" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (!$process) {
-        Write-Host "[DLL Injector] BŁĄD: Proces 'cs2.exe' nie znaleziony. Upewnij się, że gra jest uruchomiona." -ForegroundColor Red
-        exit 1
+function Start-CS2Bots {
+    Write-Host "[Bots] Szukam procesu CS2..." -ForegroundColor Cyan
+
+    $process = $null
+    $processHandle = [IntPtr]::Zero
+    $clientDllBase = [IntPtr]::Zero
+
+    # Loop until the game process is found and memory is ready.
+    while ($process -eq $null -or $processHandle -eq [IntPtr]::Zero -or $clientDllBase -eq [IntPtr]::Zero) {
+        $process = Get-Process -Name "cs2" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($process) {
+            # Use PROCESS_ALL_ACCESS for both read/write operations (needed by Bhop)
+            $processHandle = [WinAPIAndHelpers]::OpenProcess($PROCESS_VM_READ -bor $PROCESS_VM_WRITE -bor $PROCESS_VM_OPERATION, $false, $process.Id)
+            if ($processHandle -ne [IntPtr]::Zero) {
+                # Find the client.dll module's base address. This module contains most game data.
+                foreach ($module in $process.Modules) {
+                    if ($module.ModuleName -eq "client.dll") {
+                        $clientDllBase = $module.BaseAddress
+                        Write-Host "[Bots] Znaleziono cs2.exe. ID Procesu: $($process.Id)" -ForegroundColor Green
+                        Write-Host "[Bots] client.dll Base Adres: 0x$($clientDllBase.ToInt64().ToString('X'))" -ForegroundColor Green
+                        break
+                    }
+                }
+            }
+        }
+
+        if ($clientDllBase -eq [IntPtr]::Zero) {
+            Write-Host "[Bots] CS2 nie znaleziono lub client.dll nie załadowano. Ponawiam próbę za 5 sekund..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+        }
     }
 
-    $processId = $process.Id
-    $dllPath = $TempDllPath # Path to the downloaded DLL
+    Write-Host "[Bots] Aktywny. Przytrzymaj MOUSE4 dla Trigger Bot, SPACJĘ dla Bhop Bot. Naciśnij 'END', aby wyjść." -ForegroundColor Green
 
-    # Get a handle to the process with necessary access rights
-    $hProcess = [InjectorWinAPI]::OpenProcess($PROCESS_ALL_ACCESS, $false, $processId)
-    if ($hProcess -eq [IntPtr]::Zero) {
-        Write-Host "[DLL Injector] BŁĄD: Nie udało się uzyskać uchwytu procesu do cs2.exe. Upewnij się, że PowerShell jest uruchomiony jako Administrator i że masz uprawnienia." -ForegroundColor Red
-        Write-Host "[DLL Injector] Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "[DLL Injector] Uzyskano uchwyt procesu CS2: 0x$($hProcess.ToInt64().ToString('X'))" -ForegroundColor Green
+    # Main bot loop
+    while (!(IsKeyPressedPS $VK_END)) { # Check if END key is pressed to exit
+        # Check Trigger Bot activation
+        if (IsKeyPressedPS $VK_XBUTTON1) {
+            # --- Trigger Bot Logic ---
+            try {
+                $localPlayerPawnPtr = ReadMemoryPS $processHandle ($clientDllBase + [GameOffsets]::dwLocalPlayerPawn) ([IntPtr]) "dwLocalPlayerPawn"
+                if ($localPlayerPawnPtr -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 10; continue }
 
-    # Allocate memory in the target process for the DLL path
-    $dllPathBytes = [System.Text.Encoding]::ASCII.GetBytes($dllPath)
-    $dllPathSize = $dllPathBytes.Length + 1 # +1 for null terminator
-    $remoteMemory = [InjectorWinAPI]::VirtualAllocEx($hProcess, [IntPtr]::Zero, $dllPathSize, ($MEM_COMMIT -bor $MEM_RESERVE), $PAGE_READWRITE)
-    if ($remoteMemory -eq [IntPtr]::Zero) {
-        Write-Host "[DLL Injector] BŁĄD: Nie udało się zaalokować pamięci w procesie CS2." -ForegroundColor Red
-        Write-Host "[DLL Injector] Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
-        [InjectorWinAPI]::CloseHandle($hProcess) | Out-Null
-        exit 1
-    }
-    Write-Host "[DLL Injector] Zaalokowano pamięć w procesie CS2 pod adresem: 0x$($remoteMemory.ToInt64().ToString('X'))" -ForegroundColor Green
+                $localPlayerTeam = ReadMemoryPS $processHandle ($localPlayerPawnPtr + [GameOffsets]::m_iTeamNum) ([int]) "localPlayerTeam"
+                $crosshairEntityId = ReadMemoryPS $processHandle ($localPlayerPawnPtr + [GameOffsets]::m_iCrosshairTarget) ([int]) "m_iCrosshairTarget"
 
-    # Write the DLL path to the allocated memory
-    $bytesWritten = [System.UIntPtr]::Zero
-    if (!([InjectorWinAPI]::WriteProcessMemory($hProcess, $remoteMemory, $dllPathBytes, $dllPathSize, [ref]$bytesWritten))) {
-        Write-Host "[DLL Injector] BŁĄD: Nie udało się zapisać ścieżki DLL do pamięci CS2." -ForegroundColor Red
-        Write-Host "[DLL Injector] Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
-        [InjectorWinAPI]::VirtualFreeEx($hProcess, $remoteMemory, 0, 0x8000) | Out-Null # MEM_RELEASE = 0x8000
-        [InjectorWinAPI]::CloseHandle($hProcess) | Out-Null
-        exit 1
-    }
-    Write-Host "[DLL Injector] Ścieżka DLL zapisana do pamięci CS2." -ForegroundColor Green
+                $shouldFire = $false
+                if ($crosshairEntityId -gt 0 -and $crosshairEntityId -lt 1024) {
+                    $gameEntitySystemPtr = ReadMemoryPS $processHandle ($clientDllBase + [GameOffsets]::dwGameEntitySystem) ([IntPtr]) "dwGameEntitySystem"
+                    if ($gameEntitySystemPtr -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 10; continue }
 
-    # Get the address of LoadLibraryA from kernel32.dll (this address is usually the same across processes)
-    $kernel32Module = [InjectorWinAPI]::GetModuleHandleA("kernel32.dll")
-    if ($kernel32Module -eq [IntPtr]::Zero) {
-        Write-Host "[DLL Injector] BŁĄD: Nie udało się uzyskać uchwytu do kernel32.dll." -ForegroundColor Red
-        Write-Host "[DLL Injector] Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
-        [InjectorWinAPI]::VirtualFreeEx($hProcess, $remoteMemory, 0, 0x8000) | Out-Null
-        [InjectorWinAPI]::CloseHandle($hProcess) | Out-Null
-        exit 1
-    }
-    Write-Host "[DLL Injector] Uchwyt kernel32.dll: 0x$($kernel32Module.ToInt64().ToString('X'))" -ForegroundColor Green
+                    $shf_9_mult_8 = ([Int64]$crosshairEntityId -shr 9) * 0x8
+                    $band_1FF_mult_78 = ([Int64]$crosshairEntityId -band 0x1FF) * 0x78
 
-    $loadLibraryAddress = [InjectorWinAPI]::GetProcAddress($kernel32Module, "LoadLibraryA")
-    if ($loadLibraryAddress -eq [IntPtr]::Zero) {
-        Write-Host "[DLL Injector] BŁĄD: Nie udało się uzyskać adresu LoadLibraryA." -ForegroundColor Red
-        Write-Host "[DLL Injector] Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
-        [InjectorWinAPI]::VirtualFreeEx($hProcess, $remoteMemory, 0, 0x8000) | Out-Null
-        [InjectorWinAPI]::CloseHandle($hProcess) | Out-Null
-        exit 1
-    }
-    Write-Host "[DLL Injector] Adres LoadLibraryA: 0x$($loadLibraryAddress.ToInt64().ToString('X'))" -ForegroundColor Green
+                    $entityEntryAddress = [IntPtr]($gameEntitySystemPtr.ToInt64() + $shf_9_mult_8 + 0x10)
+                    $entityEntryPtr = ReadMemoryPS $processHandle $entityEntryAddress ([IntPtr]) "entityEntryPtr_base"
+                    if ($entityEntryPtr -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 10; continue }
 
-    # Create a remote thread in the target process to call LoadLibraryA
-    $remoteThreadId = [IntPtr]::Zero
-    $hRemoteThread = [InjectorWinAPI]::CreateRemoteThread(
-        $hProcess,
-        [IntPtr]::Zero,
-        0, # Default stack size
-        $loadLibraryAddress,
-        $remoteMemory,
-        0, # dwCreationFlags (0 for immediate execution)
-        [ref]$remoteThreadId
-    )
-    if ($hRemoteThread -eq [IntPtr]::Zero) {
-        Write-Host "[DLL Injector] BŁĄD: Nie udało się utworzyć zdalnego wątku w procesie CS2." -ForegroundColor Red
-        Write-Host "[DLL Injector] Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
-        [InjectorWinAPI]::VirtualFreeEx($hProcess, $remoteMemory, 0, 0x8000) | Out-Null
-        [InjectorWinAPI]::CloseHandle($hProcess) | Out-Null
-        exit 1
-    }
-    Write-Host "[DLL Injector] Zdalny wątek utworzony. Wstrzykiwanie 'cheat.dll'..." -ForegroundColor Green
+                    $entityAddress = [IntPtr]($entityEntryPtr.ToInt64() + $band_1FF_mult_78)
+                    $entityPtr = ReadMemoryPS $processHandle $entityAddress ([IntPtr]) "entityPtr_final"
 
-    # Wait for the remote thread to finish
-    [InjectorWinAPI]::WaitForSingleObject($hRemoteThread, $INFINITE) | Out-Null
-    Write-Host "[DLL Injector] Zdalny wątek zakończył działanie." -ForegroundColor Green
+                    if ($entityPtr -ne [IntPtr]::Zero) {
+                        $entityTeam = ReadMemoryPS $processHandle ($entityPtr + [GameOffsets]::m_iTeamNum) ([int]) "m_iTeamNum_entity"
+                        if ($entityTeam -ne $localPlayerTeam) {
+                            $shouldFire = $true
+                        }
+                    }
+                }
+                if ($shouldFire) {
+                    SimulateLeftClickPS
+                    Start-Sleep -Milliseconds 50 # Delay to prevent too many rapid clicks
+                }
+            }
+            catch {
+                Write-Host "[Bots] An error occurred during Trigger Bot: $($_.Exception.Message). Retrying..." -ForegroundColor Red
+            }
+        }
 
-    # Cleanup - Free allocated memory and close handles
-    [InjectorWinAPI]::VirtualFreeEx($hProcess, $remoteMemory, 0, 0x8000) | Out-Null # MEM_RELEASE = 0x8000
-    [InjectorWinAPI]::CloseHandle($hRemoteThread) | Out-Null
-    [InjectorWinAPI]::CloseHandle($hProcess) | Out-Null
-    Write-Host "[DLL Injector] Wstrzyknięto 'cheat.dll' do CS2 i zakończono czyszczenie uchwytów." -ForegroundColor Green
+        # Check Bhop activation
+        if (IsKeyPressedPS $VK_SPACE) {
+            # --- Bhop Logic ---
+            try {
+                $localPlayerPawnPtr = ReadMemoryPS $processHandle ($clientDllBase + [GameOffsets]::dwLocalPlayerPawn) ([IntPtr]) "dwLocalPlayerPawn"
+                if ($localPlayerPawnPtr -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 10; continue }
 
-    Write-Host "[DLL Injector] Aktywny. Naciśnij klawisz 'END', aby wyjść z PowerShell." -ForegroundColor Green
+                $playerFlags = ReadMemoryPS $processHandle ($localPlayerPawnPtr + [GameOffsets]::m_fFlags) ([int]) "m_fFlags"
 
-    # Keep the PowerShell script alive until END key is pressed
-    while (!(IsKeyPressed $VK_END)) {
-        Start-Sleep -Milliseconds 100 # Small delay to prevent busy-waiting
+                if (($playerFlags -band $ON_GROUND_FLAG) -gt 0) {
+                    # Write jump values
+                    WriteMemoryPS $processHandle ($clientDllBase + [GameOffsets]::dwForceJump) $JUMP_ON "dwForceJump_ON"
+                    Start-Sleep -Milliseconds 5
+                    WriteMemoryPS $processHandle ($clientDllBase + [GameOffsets]::dwForceJump) $JUMP_OFF "dwForceJump_OFF"
+                }
+            }
+            catch {
+                Write-Host "[Bots] An error occurred during Bhop Bot: $($_.Exception.Message). Retrying..." -ForegroundColor Red
+            }
+        }
+
+        Start-Sleep -Milliseconds 1 # Main loop delay for responsiveness
     }
 
-    Write-Host "`n[DLL Injector] Klawisz 'END' naciśnięty. Zamykam injector..." -ForegroundColor Cyan
+    # Cleanup: Close the process handle when the bot exits
+    if ($processHandle -ne [IntPtr]::Zero) {
+        [WinAPIAndHelpers]::CloseHandle($processHandle) | Out-Null
+        Write-Host "[Bots] Process handle closed. Exiting." -ForegroundColor Cyan
+    }
 }
 #endregion
 
 # Set console title
-$Host.UI.RawUI.WindowTitle = "CS2 DLL Injector (PowerShell)"
-Write-Host "Uruchamiam CS2 DLL Injector (PowerShell)..." -ForegroundColor White
+$Host.UI.RawUI.WindowTitle = "CS2 Bots Launcher (PowerShell)"
+Write-Host "Uruchamiam CS2 Bots Launcher (PowerShell)..." -ForegroundColor White
 Write-Host "------------------------------------------" -ForegroundColor White
 
-# Start the DLL injector logic
-Start-DLLInjector
+# Start the main bot logic
+Start-CS2Bots
 
-Write-Host "`n[DLL Injector] Injector zakończył działanie." -ForegroundColor Cyan
+Write-Host "`nKlawisz 'END' naciśnięty. Zamykam wszystkie boty." -ForegroundColor Cyan
