@@ -1,7 +1,7 @@
 # This PowerShell script replicates the functionality of the C# TriggerBot.cs
 # and the relevant parts of Program.cs for launching the Trigger Bot.
 #
-# This version loads external C# functionality from 'cheat.dll'.
+# This version embeds the C# functionality directly into the script for self-contained execution.
 #
 # IMPORTANT: Game offsets change frequently with game updates. You MUST update the offsets
 # to match the current game version. Using outdated offsets will lead to incorrect behavior or crashes.
@@ -10,19 +10,64 @@
 # is against most game's terms of service and can lead to permanent account bans.
 # Use at your own risk and responsibility.
 
-#region Load External C# DLL
-# Load the pre-compiled C# DLL containing WinAPI imports and memory reading functions.
-# Ensure 'cheat.dll' is in the same directory as this PowerShell script.
-Add-Type -LiteralPath ".\cheat.dll"
+#region WinAPI Imports and Helper Functions (Embedded C#)
+# We embed C# code to use WinAPI functions directly, as PowerShell doesn't have native
+# equivalents for low-level memory operations or direct P/Invoke without this.
+Add-Type -TypeDefinition @"
+    using System;
+    using System.Diagnostics;
+    using System.Runtime.InteropServices;
 
-# If your DLL's main class containing the WinAPI functions is named differently than 'WinAPI',
-# you will need to update the references in the 'Helper Functions (PowerShell Wrappers)' region below.
-# For example, if it's 'MyApiHelpers', you would change '[WinAPI]::' to '[MyApiHelpers]::'.
-#
-# If you don't have cheat.dll, you would need to compile it from your C# source files.
-# Example compilation command (assuming WinAPI.cs and any other necessary files):
-# csc.exe /target:library /out:cheat.dll WinAPI.cs YourOtherFiles.cs
-# (You might need to adjust paths and refer to .NET Framework assemblies if not using modern .NET SDK)
+    public class WinAPI
+    {
+        // Used to send mouse input events.
+        [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
+        public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);
+
+        // Used to open a process with specific access rights.
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+        // Used to read memory from a process.
+        [DllImport("kernel32.dll")]
+        public static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, [Out] byte[] lpBuffer, int dwSize, out int lpNumberOfBytesRead);
+
+        // Used to close an opened process handle.
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        // Used to get the asynchronous key state.
+        // This allows checking if a key is currently pressed, even if the application is not in focus.
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int vKey);
+
+        // Generic ReadMemory function using Marshal
+        public static T ReadMemory<T>(IntPtr hProcess, IntPtr address, string debugTag = "") where T : struct
+        {
+            int size = Marshal.SizeOf(typeof(T));
+            byte[] buffer = new byte[size];
+            int bytesRead;
+
+            if (ReadProcessMemory(hProcess, address, buffer, size, out bytesRead) && bytesRead == size)
+            {
+                GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+                T data = (T)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(T));
+                handle.Free();
+                return data;
+            }
+            else
+            {
+                int errorCode = Marshal.GetLastWin32Error();
+                // This debug line is now enabled to get granular error info from C#
+                // Corrected to use basic string concatenation for maximum compatibility with Add-Type
+                Console.WriteLine("[TriggerBot] DEBUG ERROR: Failed to read memory at 0x" + address.ToInt64().ToString("X") + " for '" + debugTag + "'. Bytes read: " + bytesRead + "/" + size + ". Win32 Error: " + errorCode);
+                return default(T);
+            }
+        }
+    }
+"@ -Language CSharp
+
 #endregion
 
 #region Global Constants and Offsets
