@@ -99,6 +99,9 @@ $Offsets = @{
     m_hPlayerPawn            = 0x824 # Not used in current logic
 }
 
+# Debugging Flag
+$DebugMode = $true # Set to $true to enable verbose debugging output
+
 #endregion
 
 #region Helper Functions (PowerShell Wrappers)
@@ -174,12 +177,15 @@ function Start-TriggerBot {
                 Start-Sleep -Milliseconds 10 # Shorter sleep as it's an in-game check
                 continue
             }
+            if ($DebugMode) { Write-Host "[Debug] localPlayerPawnPtr: 0x$($localPlayerPawnPtr.ToInt64().ToString('X'))" }
 
             # Read local player's team number
             $localPlayerTeam = ReadMemoryPS $processHandle ($localPlayerPawnPtr + $Offsets.m_iTeamNum) ([int]) "localPlayerTeam"
+            if ($DebugMode) { Write-Host "[Debug] localPlayerTeam: $($localPlayerTeam)" }
 
             # Read the ID of the entity currently in the crosshair
             $crosshairEntityId = ReadMemoryPS $processHandle ($localPlayerPawnPtr + $Offsets.m_iCrosshairTarget) ([int]) "m_iCrosshairTarget"
+            if ($DebugMode) { Write-Host "[Debug] crosshairEntityId: $($crosshairEntityId)" }
 
             $shouldFire = $false
 
@@ -193,13 +199,20 @@ function Start-TriggerBot {
                     Start-Sleep -Milliseconds 10
                     continue
                 }
+                if ($DebugMode) { Write-Host "[Debug] gameEntitySystemPtr: 0x$($gameEntitySystemPtr.ToInt64().ToString('X'))" }
 
                 # Explicitly cast to Int64 for intermediate calculations to prevent overflow
                 $shf_9_mult_8 = ([Int64]$crosshairEntityId -shr 9) * 0x8
                 $band_1FF_mult_78 = ([Int64]$crosshairEntityId -band 0x1FF) * 0x78
+                if ($DebugMode) {
+                    Write-Host "[Debug] shf_9_mult_8: 0x$($shf_9_mult_8.ToString('X'))"
+                    Write-Host "[Debug] band_1FF_mult_78: 0x$($band_1FF_mult_78.ToString('X'))"
+                }
 
                 # Calculate entity entry pointer
                 $entityEntryAddress = [IntPtr]($gameEntitySystemPtr.ToInt64() + $shf_9_mult_8 + 0x10)
+                if ($DebugMode) { Write-Host "[Debug] entityEntryAddress (computed): 0x$($entityEntryAddress.ToInt64().ToString('X'))" }
+
                 $entityEntryPtr = ReadMemoryPS $processHandle $entityEntryAddress ([IntPtr]) "entityEntryPtr_base"
 
                 if ($entityEntryPtr -eq [IntPtr]::Zero) {
@@ -207,20 +220,29 @@ function Start-TriggerBot {
                     Start-Sleep -Milliseconds 10
                     continue
                 }
+                if ($DebugMode) { Write-Host "[Debug] entityEntryPtr (read): 0x$($entityEntryPtr.ToInt64().ToString('X'))" }
 
                 # Calculate final entity pointer
                 $entityAddress = [IntPtr]($entityEntryPtr.ToInt64() + $band_1FF_mult_78)
+                if ($DebugMode) { Write-Host "[Debug] entityAddress (computed): 0x$($entityAddress.ToInt64().ToString('X'))" }
+
                 $entityPtr = ReadMemoryPS $processHandle $entityAddress ([IntPtr]) "entityPtr_final"
 
                 if ($entityPtr -ne [IntPtr]::Zero) {
+                    if ($DebugMode) { Write-Host "[Debug] entityPtr (read): 0x$($entityPtr.ToInt64().ToString('X'))" }
                     # Read entity's team number
                     $entityTeam = ReadMemoryPS $processHandle ($entityPtr + $Offsets.m_iTeamNum) ([int]) "m_iTeamNum_entity"
+                    if ($DebugMode) { Write-Host "[Debug] entityTeam: $($entityTeam)" }
 
                     # Trigger logic: Only shoot if it's an enemy
                     if ($entityTeam -ne $localPlayerTeam) {
                         $shouldFire = $true
                     }
+                } else {
+                    if ($DebugMode) { Write-Host "[Debug] entityPtr (read): 0x0. Cannot resolve entity." }
                 }
+            } else {
+                if ($DebugMode) { Write-Host "[Debug] crosshairEntityId ($($crosshairEntityId)) is out of valid range (1-1023)." }
             }
 
             # Perform attack based on shouldFire flag
