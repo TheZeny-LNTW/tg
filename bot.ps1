@@ -1,0 +1,241 @@
+# This PowerShell script replicates the functionality of the C# TriggerBot.cs
+# and the relevant parts of Program.cs for launching the Trigger Bot.
+#
+# IMPORTANT: Game offsets change frequently with game updates. You MUST update the offsets
+# to match the current game version. Using outdated offsets will lead to incorrect behavior or crashes.
+#
+# This code is provided for educational purposes ONLY. Using such tools in online games
+# is against most game's terms of service and can lead to permanent account bans.
+# Use at your own risk and responsibility.
+
+#region WinAPI Imports and Helper Functions (Embedded C#)
+# We embed C# code to use WinAPI functions directly, as PowerShell doesn't have native
+# equivalents for low-level memory operations or direct P/Invoke without this.
+Add-Type -TypeDefinition @"
+    using System;
+    using System.Diagnostics;
+    using System.Runtime.InteropServices;
+
+    public class WinAPI
+    {
+        // Used to send mouse input events.
+        [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
+        public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);
+
+        // Used to open a process with specific access rights.
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+        // Used to read memory from a process.
+        [DllImport("kernel32.dll")]
+        public static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, [Out] byte[] lpBuffer, int dwSize, out int lpNumberOfBytesRead);
+
+        // Used to close an opened process handle.
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        // Used to get the asynchronous key state.
+        // This allows checking if a key is currently pressed, even if the application is not in focus.
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int vKey);
+
+        // Generic ReadMemory function using Marshal
+        public static T ReadMemory<T>(IntPtr hProcess, IntPtr address, string debugTag = "") where T : struct
+        {
+            int size = Marshal.SizeOf(typeof(T));
+            byte[] buffer = new byte[size];
+            int bytesRead;
+
+            if (ReadProcessMemory(hProcess, address, buffer, size, out bytesRead) && bytesRead == size)
+            {
+                GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+                T data = (T)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(T));
+                handle.Free();
+                return data;
+            }
+            else
+            {
+                int errorCode = Marshal.GetLastWin32Error();
+                // Optionally print debug info, but keep it quiet for speed in main loop
+                // if (!string.IsNullOrEmpty(debugTag))
+                // {
+                //     Console.WriteLine($"[PS-TriggerBot] DEBUG ERROR: Failed to read memory at 0x{address.ToInt64():X} for '{debugTag}'. Bytes read: {bytesRead}/{size}. Win32 Error: {errorCode}");
+                // }
+                return default(T);
+            }
+        }
+    }
+"@ -Language CSharp
+
+#endregion
+
+#region Global Constants and Offsets
+
+# Mouse event flags
+$MOUSEEVENTF_LEFTDOWN = 0x02 # Left button down
+$MOUSEEVENTF_LEFTUP   = 0x04 # Left button up
+
+# Process access rights
+$PROCESS_VM_READ = 0x0010 # Required to read memory
+
+# Virtual Key Codes
+$VK_XBUTTON1 = 0x05 # Mouse Button 4 (Activation key)
+$VK_END      = 0x23 # END key (Exit key)
+
+# Game Offsets (YOU MUST UPDATE THESE FOR THE CURRENT GAME VERSION)
+# These are taken directly from your provided C# TriggerBot.cs
+$Offsets = @{
+    dwLocalPlayerPawn        = 0x18560D0
+    dwEntityList             = 0x1A020A8
+    dwGameEntitySystem       = 0x1B25BD8
+    dwGameEntitySystem_highestEntityIndex = 0x20F0 # Not used in current logic
+    m_iTeamNum               = 0x3E3
+    m_iHealth                = 0x344
+    m_entitySpottedState     = 0x1630
+    bSpotted                 = 0x8
+    m_iCrosshairTarget       = 0x1458
+    m_fFlags                 = 0x3EC # Not used in current logic
+    m_hPlayerPawn            = 0x824 # Not used in current logic
+}
+
+#endregion
+
+#region Helper Functions (PowerShell Wrappers)
+
+function IsKeyPressed($vKey) {
+    # Check if a virtual key is pressed using the imported GetAsyncKeyState
+    return (([int]([WinAPI]::GetAsyncKeyState($vKey))) -band 0x8000) -ne 0
+}
+
+function SimulateLeftClick() {
+    # Simulate a left mouse click using the imported mouse_event
+    [WinAPI]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    Start-Sleep -Milliseconds 10
+    [WinAPI]::mouse_event($MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+}
+
+function ReadMemoryPS([IntPtr]$hProcess, [IntPtr]$address, [Type]$type, [string]$debugTag = "") {
+    # Wrapper function to call the C# ReadMemory generic method
+    # It converts the type to a generic type parameter suitable for the C# method.
+    return [WinAPI]::ReadMemory([System.Object].GetType().GetMethod("ReadMemory").MakeGenericMethod($type)).Invoke($null, @($hProcess, $address, $debugTag))
+}
+
+#endregion
+
+#region Main Trigger Bot Logic
+
+function Start-TriggerBot {
+    Write-Host "[TriggerBot] Searching for CS2 process..." -ForegroundColor Cyan
+
+    $process = $null
+    $processHandle = [IntPtr]::Zero
+    $clientDllBase = [IntPtr]::Zero
+
+    # Loop until the game process is found and memory is ready.
+    while ($process -eq $null -or $processHandle -eq [IntPtr]::Zero -or $clientDllBase -eq [IntPtr]::Zero) {
+        $process = Get-Process -Name "cs2" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($process) {
+            $processHandle = [WinAPI]::OpenProcess($PROCESS_VM_READ, $false, $process.Id)
+            if ($processHandle -ne [IntPtr]::Zero) {
+                # Find the client.dll module's base address
+                foreach ($module in $process.Modules) {
+                    if ($module.ModuleName -eq "client.dll") {
+                        $clientDllBase = $module.BaseAddress
+                        Write-Host "[TriggerBot] Found cs2.exe. Process ID: $($process.Id)" -ForegroundColor Green
+                        Write-Host "[TriggerBot] client.dll Base Address: 0x$($clientDllBase.ToInt64().ToString('X'))" -ForegroundColor Green
+                        break
+                    }
+                }
+            }
+        }
+
+        if ($clientDllBase -eq [IntPtr]::Zero) {
+            Write-Host "[TriggerBot] CS2 not found or client.dll not loaded. Retrying in 5 seconds..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    Write-Host "[TriggerBot] Active. Hold MOUSE4 to enable. Press 'END' to exit." -ForegroundColor Green
+
+    # Main bot loop
+    while (!(IsKeyPressed $VK_END)) { # Check if END key is pressed to exit
+        # Only proceed with trigger logic if MOUSE4 is pressed.
+        if (!(IsKeyPressed $VK_XBUTTON1)) {
+            Start-Sleep -Milliseconds 100 # Longer delay when not active to reduce CPU usage
+            continue
+        }
+
+        try {
+            # Read local player's pawn address
+            $localPlayerPawnPtr = ReadMemoryPS $processHandle ($clientDllBase + $Offsets.dwLocalPlayerPawn) ([IntPtr]) "dwLocalPlayerPawn"
+            if ($localPlayerPawnPtr -eq [IntPtr]::Zero) {
+                Write-Host "[TriggerBot] Local player pawn not found. Are you in-game? (dwLocalPlayerPawn might be outdated)" -ForegroundColor Yellow
+                Start-Sleep -Milliseconds 10 # Shorter sleep as it's an in-game check
+                continue
+            }
+
+            # Read local player's team number
+            $localPlayerTeam = ReadMemoryPS $processHandle ($localPlayerPawnPtr + $Offsets.m_iTeamNum) ([int]) "localPlayerTeam"
+
+            # Read the ID of the entity currently in the crosshair
+            $crosshairEntityId = ReadMemoryPS $processHandle ($localPlayerPawnPtr + $Offsets.m_iCrosshairTarget) ([int]) "m_iCrosshairTarget"
+
+            $shouldFire = $false
+
+            # Validate crosshairEntityId. Using broader range 1 to 1023.
+            if ($crosshairEntityId -gt 0 -and $crosshairEntityId -lt 1024) {
+                # IMPROVED ENTITY POINTER RESOLUTION LOGIC (from your C# code)
+                $gameEntitySystemPtr = ReadMemoryPS $processHandle ($clientDllBase + $Offsets.dwGameEntitySystem) ([IntPtr]) "dwGameEntitySystem"
+
+                if ($gameEntitySystemPtr -eq [IntPtr]::Zero) {
+                    # Write-Host "[TriggerBot] DEBUG ERROR: dwGameEntitySystem pointer is invalid (0x$(([IntPtr]($clientDllBase.ToInt64() + $Offsets.dwGameEntitySystem)).ToInt64().ToString('X'))). Cannot resolve entity." -ForegroundColor Red
+                    Start-Sleep -Milliseconds 10
+                    continue
+                }
+
+                $entityEntryPtr = ReadMemoryPS $processHandle ([IntPtr]($gameEntitySystemPtr.ToInt64() + (($crosshairEntityId -shr 9) * 0x8) + 0x10)) ([IntPtr]) "entityEntryPtr_base"
+                $entityPtr = ReadMemoryPS $processHandle ([IntPtr]($entityEntryPtr.ToInt64() + (($crosshairEntityId -band 0x1FF) * 0x78))) ([IntPtr]) "entityPtr_final"
+
+                if ($entityPtr -ne [IntPtr]::Zero) {
+                    # Read entity's team number
+                    $entityTeam = ReadMemoryPS $processHandle ($entityPtr + $Offsets.m_iTeamNum) ([int]) "m_iTeamNum_entity"
+
+                    # Trigger logic: Only shoot if it's an enemy
+                    if ($entityTeam -ne $localPlayerTeam) {
+                        $shouldFire = $true
+                    }
+                }
+            }
+
+            # Perform attack based on shouldFire flag
+            if ($shouldFire) {
+                SimulateLeftClick() # Use mouse_event for clicking
+                Start-Sleep -Milliseconds 50 # Small delay to prevent too many rapid clicks
+            }
+        }
+        catch {
+            Write-Host "[TriggerBot] An error occurred: $($_.Exception.Message). Retrying..." -ForegroundColor Red
+            Start-Sleep -Milliseconds 100 # Longer delay on error
+        }
+
+        Start-Sleep -Milliseconds 1 # Main loop delay for responsiveness
+    }
+
+    # Cleanup: Close the process handle when the bot exits
+    if ($processHandle -ne [IntPtr]::Zero) {
+        [WinAPI]::CloseHandle($processHandle) | Out-Null # Use Out-Null to suppress boolean output
+        Write-Host "[TriggerBot] Process handle closed. Exiting." -ForegroundColor Cyan
+    }
+}
+
+# Set console title
+$Host.UI.RawUI.WindowTitle = "CS2 Bots Launcher - Trigger Bot (PowerShell)"
+Write-Host "Starting CS2 Trigger Bot Launcher (PowerShell)..." -ForegroundColor White
+Write-Host "------------------------------------------" -ForegroundColor White
+
+# Start the trigger bot
+Start-TriggerBot
+
+Write-Host "`n'END' key pressed. Exiting Trigger Bot." -ForegroundColor Cyan
+
