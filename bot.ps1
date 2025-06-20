@@ -1,11 +1,10 @@
-# This PowerShell script replicates the functionality of the C# TriggerBot.cs
-# and the relevant parts of Program.cs for launching the Trigger Bot.
+# This PowerShell script is designed to only load a pre-compiled 'cheat.dll'
+# into the Counter-Strike 2 (cs2.exe) process.
+# It does NOT contain any cheat logic itself; all cheat functionality
+# is expected to be within the 'cheat.dll' file.
 #
-# This version downloads and loads 'cheat.dll' from the GitHub repository at runtime
-# for self-contained execution, resolving the FileNotFoundException.
-#
-# IMPORTANT: Game offsets change frequently with game updates. You MUST update the offsets
-# to match the current game version. Using outdated offsets will lead to incorrect behavior or crashes.
+# IMPORTANT: This script requires 'cheat.dll' to be present in your GitHub repository.
+# Ensure the DLL is compatible with the current version of CS2.
 #
 # This code is provided for educational purposes ONLY. Using such tools in online games
 # is against most game's terms of service and can lead to permanent account bans.
@@ -16,252 +15,102 @@
 $DllGitHubRawUrl = "https://raw.githubusercontent.com/TheZeny-LNTW/tg/main/cheat.dll"
 $TempDllPath = Join-Path $env:TEMP "cheat.dll"
 
-Write-Host "[TriggerBot] Attempting to download cheat.dll from GitHub..." -ForegroundColor Yellow
+Write-Host "[DLL Injector] Próba pobrania cheat.dll z GitHub..." -ForegroundColor Yellow
 
 try {
     # Download the DLL to a temporary path
     Invoke-RestMethod -Uri $DllGitHubRawUrl -OutFile $TempDllPath
-    Write-Host "[TriggerBot] cheat.dll downloaded to: $($TempDllPath)" -ForegroundColor Green
+    Write-Host "[DLL Injector] cheat.dll pobrano do: $($TempDllPath)" -ForegroundColor Green
 
     # Load the DLL from the temporary path
+    # This makes the public static classes/methods from the DLL available in PowerShell.
     Add-Type -LiteralPath $TempDllPath
-    Write-Host "[TriggerBot] cheat.dll loaded successfully." -ForegroundColor Green
+    Write-Host "[DLL Injector] cheat.dll załadowano pomyślnie." -ForegroundColor Green
 
-    # Clean up the temporary DLL file after loading (optional, but good practice)
+    # You might want to remove the temporary DLL file after loading.
+    # Uncomment the line below if you wish to automatically delete the downloaded DLL.
     # Remove-Item $TempDllPath -ErrorAction SilentlyContinue
 
 } catch {
-    Write-Host "[TriggerBot] ERROR: Failed to download or load cheat.dll." -ForegroundColor Red
-    Write-Host "[TriggerBot] Please ensure 'cheat.dll' exists at '$DllGitHubRawUrl'." -ForegroundColor Red
-    Write-Host "[TriggerBot] Error Details: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[DLL Injector] BŁĄD: Nie udało się pobrać lub załadować cheat.dll." -ForegroundColor Red
+    Write-Host "[DLL Injector] Upewnij się, że 'cheat.dll' istnieje pod adresem '$DllGitHubRawUrl' i jest poprawny." -ForegroundColor Red
+    Write-Host "[DLL Injector] Szczegóły błędu: $($_.Exception.Message)" -ForegroundColor Red
     exit 1 # Exit the script if DLL cannot be loaded
 }
 #endregion
 
-#region Global Constants and Offsets
+# Virtual Key Code for the END key (to exit the script)
+private const int VK_END = 0x23;
 
-# Mouse event flags
-$MOUSEEVENTF_LEFTDOWN = 0x02 # Left button down
-$MOUSEEVENTF_LEFTUP   = 0x04 # Left button up
+#region WinAPI Imports (Minimal for Exit Key)
+# We need GetAsyncKeyState to check for the END key to exit the script.
+# This should ideally also be part of your cheat.dll if you compile it with your WinAPI class.
+Add-Type -TypeDefinition @"
+    using System.Runtime.InteropServices;
 
-# Process access rights
-$PROCESS_VM_READ = 0x0010 # Required to read memory
-
-# Virtual Key Codes
-$VK_XBUTTON1 = 0x05 # Mouse Button 4 (Activation key)
-$VK_END       = 0x23 # END key (Exit key)
-
-# Game Offsets (YOU MUST UPDATE THESE FOR THE CURRENT GAME VERSION)
-# These are taken directly from your provided C# TriggerBot.cs
-$Offsets = @{
-    dwLocalPlayerPawn        = 0x18560D0
-    dwEntityList             = 0x1A020A8
-    dwGameEntitySystem       = 0x1B25BD8
-    dwGameEntitySystem_highestEntityIndex = 0x20F0 # Not used in current logic
-    m_iTeamNum               = 0x3E3
-    m_iHealth                = 0x344
-    m_entitySpottedState     = 0x1630
-    bSpotted                 = 0x8
-    m_iCrosshairTarget       = 0x1458
-    m_fFlags                 = 0x3EC # Not used in current logic
-    m_hPlayerPawn            = 0x824 # Not used in current logic
-}
-
-# Debugging Flag
-$DebugMode = $true # Set to $true to enable verbose debugging output
-
-#endregion
-
-#region Helper Functions (PowerShell Wrappers)
+    public class MinimalWinAPI
+    {
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int vKey);
+    }
+"@ -Language CSharp
 
 function IsKeyPressed($vKey) {
-    # Check if a virtual key is pressed using the imported GetAsyncKeyState from WinAPI class in cheat.dll
-    return (([int]([WinAPI]::GetAsyncKeyState($vKey))) -band 0x8000) -ne 0
+    # Checks if a virtual key is currently pressed.
+    return (([int]([MinimalWinAPI]::GetAsyncKeyState($vKey))) -band 0x8000) -ne 0
 }
-
-function SimulateLeftClick() {
-    # Simulate a left mouse click using the imported mouse_event from WinAPI class in cheat.dll
-    [WinAPI]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    Start-Sleep -Milliseconds 10
-    [WinAPI]::mouse_event($MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-}
-
-function ReadMemoryPS([IntPtr]$hProcess, [IntPtr]$address, [Type]$type, [string]$debugTag = "") {
-    # Wrapper function to call the C# ReadMemory generic method from WinAPI class in cheat.dll
-    # It converts the type to a generic type parameter suitable for the C# method.
-    # We now handle error logging for ReadMemory failures directly in PowerShell.
-    $result = [WinAPI]::ReadMemory([System.Object].GetType().GetMethod("ReadMemory").MakeGenericMethod($type)).Invoke($null, @($hProcess, $address, $debugTag))
-
-    # Check if the result is the default value (indicating a read failure in C#)
-    if ($result -eq $null -or $result -eq [System.Activator]::CreateInstance($type)) {
-        if ($DebugMode -and -not $global:HasLoggedMemoryReadError) {
-            # Log this error only once to avoid spamming, unless it's a new type of error.
-            Write-Host "[TriggerBot] DEBUG WARNING: ReadMemory failed for '$debugTag' at 0x$($address.ToInt64().ToString('X')). This might indicate outdated offsets or permission issues." -ForegroundColor Yellow
-            # To re-enable this warning on subsequent failures, uncomment the line below:
-            # $global:HasLoggedMemoryReadError = $false
-            $global:HasLoggedMemoryReadError = $true # Set flag to true after logging
-        }
-        return default($type) # Return default value to propagate the failure
-    } else {
-        $global:HasLoggedMemoryReadError = $false # Reset flag if a successful read occurs
-    }
-    return $result
-}
-
 #endregion
 
-#region Main Trigger Bot Logic
-
-function Start-TriggerBot {
-    Write-Host "[TriggerBot] Searching for CS2 process..." -ForegroundColor Cyan
+#region Main DLL Injection Logic
+function Start-DLLInjector {
+    Write-Host "[DLL Injector] Szukam procesu CS2..." -ForegroundColor Cyan
 
     $process = $null
     $processHandle = [IntPtr]::Zero
-    $clientDllBase = [IntPtr]::Zero
 
-    # Loop until the game process is found and memory is ready.
-    while ($process -eq $null -or $processHandle -eq [IntPtr]::Zero -or $clientDllBase -eq [IntPtr]::Zero) {
+    # Loop until the game process is found.
+    while ($process -eq $null -or $processHandle -eq [IntPtr]::Zero) {
         $process = Get-Process -Name "cs2" -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($process) {
-            $processHandle = [WinAPI]::OpenProcess($PROCESS_VM_READ, $false, $process.Id)
+            # You might need PROCESS_ALL_ACCESS (0x1F0FFF) or similar if your DLL requires more rights
+            $processHandle = [WinAPI]::OpenProcess(0x001F0FFF, $false, $process.Id) # Using a broad access right for injection (PROCESS_ALL_ACCESS)
             if ($processHandle -ne [IntPtr]::Zero) {
-                # Find the client.dll module's base address
-                foreach ($module in $process.Modules) {
-                    if ($module.ModuleName -eq "client.dll") {
-                        $clientDllBase = $module.BaseAddress
-                        Write-Host "[TriggerBot] Found cs2.exe. Process ID: $($process.Id)" -ForegroundColor Green
-                        Write-Host "[TriggerBot] client.dll Base Address: 0x$($clientDllBase.ToInt64().ToString('X'))" -ForegroundColor Green
-                        break
-                    }
-                }
+                Write-Host "[DLL Injector] Znaleziono cs2.exe. ID Procesu: $($process.Id)" -ForegroundColor Green
+                Write-Host "[DLL Injector] Uzyskano uchwyt procesu. Teraz 'cheat.dll' powinien działać." -ForegroundColor Green
+                break
+            } else {
+                Write-Host "[DLL Injector] Nie udało się uzyskać uchwytu procesu do cs2.exe. Upewnij się, że PowerShell jest uruchomiony jako Administrator." -ForegroundColor Red
+                Start-Sleep -Seconds 5
             }
-        }
-
-        if ($clientDllBase -eq [IntPtr]::Zero) {
-            Write-Host "[TriggerBot] CS2 not found or client.dll not loaded. Retrying in 5 seconds..." -ForegroundColor Yellow
+        } else {
+            Write-Host "[DLL Injector] CS2 nie znaleziono. Ponawiam próbę za 5 sekund..." -ForegroundColor Yellow
             Start-Sleep -Seconds 5
         }
     }
 
-    Write-Host "[TriggerBot] Active. Hold MOUSE4 to enable. Press 'END' to exit." -ForegroundColor Green
+    Write-Host "[DLL Injector] Aktywny. Naciśnij klawisz 'END', aby wyjść." -ForegroundColor Green
 
-    # Initialize a flag to prevent spamming warnings about memory read failures
-    $global:HasLoggedMemoryReadError = $false
-
-    # Main bot loop
-    while (!(IsKeyPressed $VK_END)) { # Check if END key is pressed to exit
-        # Only proceed with trigger logic if MOUSE4 is pressed.
-        if (!(IsKeyPressed $VK_XBUTTON1)) {
-            Start-Sleep -Milliseconds 100 # Longer delay when not active to reduce CPU usage
-            continue
-        }
-
-        try {
-            # Read local player's pawn address
-            $localPlayerPawnPtr = ReadMemoryPS $processHandle ($clientDllBase + $Offsets.dwLocalPlayerPawn) ([IntPtr]) "dwLocalPlayerPawn"
-            if ($localPlayerPawnPtr -eq [IntPtr]::Zero) {
-                # Error message already handled by ReadMemoryPS, just continue loop
-                Start-Sleep -Milliseconds 10
-                continue
-            }
-            if ($DebugMode) { Write-Host "[Debug] localPlayerPawnPtr: 0x$($localPlayerPawnPtr.ToInt64().ToString('X'))" }
-
-            # Read local player's team number
-            $localPlayerTeam = ReadMemoryPS $processHandle ($localPlayerPawnPtr + $Offsets.m_iTeamNum) ([int]) "localPlayerTeam"
-            # No explicit check needed here, ReadMemoryPS handles default if failed
-            if ($DebugMode) { Write-Host "[Debug] localPlayerTeam: $($localPlayerTeam)" }
-
-            # Read the ID of the entity currently in the crosshair
-            $crosshairEntityId = ReadMemoryPS $processHandle ($localPlayerPawnPtr + $Offsets.m_iCrosshairTarget) ([int]) "m_iCrosshairTarget"
-            # No explicit check needed here, ReadMemoryPS handles default if failed
-            if ($DebugMode) { Write-Host "[Debug] crosshairEntityId: $($crosshairEntityId)" }
-
-            $shouldFire = $false
-
-            # Validate crosshairEntityId. Using broader range 1 to 1023.
-            # If crosshairEntityId is 0 (default if read failed), this condition also handles it.
-            if ($crosshairEntityId -gt 0 -and $crosshairEntityId -lt 1024) {
-                # IMPROVED ENTITY POINTER RESOLUTION LOGIC (from your C# code)
-                $gameEntitySystemPtr = ReadMemoryPS $processHandle ($clientDllBase + $Offsets.dwGameEntitySystem) ([IntPtr]) "dwGameEntitySystem"
-
-                if ($gameEntitySystemPtr -eq [IntPtr]::Zero) {
-                    Write-Host "[TriggerBot] DEBUG ERROR: dwGameEntitySystem pointer is invalid. Cannot resolve entity." -ForegroundColor Red
-                    Start-Sleep -Milliseconds 10
-                    continue
-                }
-                if ($DebugMode) { Write-Host "[Debug] gameEntitySystemPtr: 0x$($gameEntitySystemPtr.ToInt64().ToString('X'))" }
-
-                # Explicitly cast to Int64 for intermediate calculations to prevent overflow
-                $shf_9_mult_8 = ([Int64]$crosshairEntityId -shr 9) * 0x8
-                $band_1FF_mult_78 = ([Int64]$crosshairEntityId -band 0x1FF) * 0x78
-                if ($DebugMode) {
-                    Write-Host "[Debug] shf_9_mult_8: 0x$($shf_9_mult_8.ToString('X'))"
-                    Write-Host "[Debug] band_1FF_mult_78: 0x$($band_1FF_mult_78.ToString('X'))"
-                }
-
-                # Calculate entity entry pointer
-                $entityEntryAddress = [IntPtr]($gameEntitySystemPtr.ToInt64() + $shf_9_mult_8 + 0x10)
-                if ($DebugMode) { Write-Host "[Debug] entityEntryAddress (computed): 0x$($entityEntryAddress.ToInt64().ToString('X'))" }
-
-                $entityEntryPtr = ReadMemoryPS $processHandle $entityEntryAddress ([IntPtr]) "entityEntryPtr_base"
-
-                if ($entityEntryPtr -eq [IntPtr]::Zero) {
-                    # Error message already handled by ReadMemoryPS, just continue loop
-                    Start-Sleep -Milliseconds 10
-                    continue
-                }
-                if ($DebugMode) { Write-Host "[Debug] entityEntryPtr (read): 0x$($entityEntryPtr.ToInt64().ToString('X'))" }
-
-                # Calculate final entity pointer
-                $entityAddress = [IntPtr]($entityEntryPtr.ToInt64() + $band_1FF_mult_78)
-                if ($DebugMode) { Write-Host "[Debug] entityAddress (computed): 0x$($entityAddress.ToInt64().ToString('X'))" }
-
-                $entityPtr = ReadMemoryPS $processHandle $entityAddress ([IntPtr]) "entityPtr_final"
-
-                if ($entityPtr -ne [IntPtr]::Zero) {
-                    if ($DebugMode) { Write-Host "[Debug] entityPtr (read): 0x$($entityPtr.ToInt64().ToString('X'))" }
-                    # Read entity's team number
-                    $entityTeam = ReadMemoryPS $processHandle ($entityPtr + $Offsets.m_iTeamNum) ([int]) "m_iTeamNum_entity"
-                    if ($DebugMode) { Write-Host "[Debug] entityTeam: $($entityTeam)" }
-
-                    # Trigger logic: Only shoot if it's an enemy
-                    if ($entityTeam -ne $localPlayerTeam) {
-                        $shouldFire = $true
-                    }
-                } else {
-                    if ($DebugMode) { Write-Host "[Debug] entityPtr (read): 0x0. Cannot resolve entity." }
-                }
-            } else {
-                if ($DebugMode) { Write-Host "[Debug] crosshairEntityId ($($crosshairEntityId)) is out of valid range (1-1023)." }
-            }
-
-            # Perform attack based on shouldFire flag
-            if ($shouldFire) {
-                SimulateLeftClick # Corrected: Removed parentheses for PowerShell function call
-                Start-Sleep -Milliseconds 50 # Small delay to prevent too many rapid clicks
-            }
-        }
-        catch {
-            Write-Host "[TriggerBot] An error occurred: $($_.Exception.Message). Retrying..." -ForegroundColor Red
-            Start-Sleep -Milliseconds 100 # Longer delay on error
-        }
-
-        Start-Sleep -Milliseconds 1 # Main loop delay for responsiveness
+    # Keep the script alive. Your cheat.dll should now be active in CS2.
+    while (!(IsKeyPressed $VK_END)) {
+        Start-Sleep -Milliseconds 100 # Small delay to prevent busy-waiting
     }
 
-    # Cleanup: Close the process handle when the bot exits
+    Write-Host "`n[DLL Injector] Klawisz 'END' naciśnięty. Zamykam injector..." -ForegroundColor Cyan
+
+    # Cleanup: Close the process handle when the injector exits
     if ($processHandle -ne [IntPtr]::Zero) {
-        [WinAPI]::CloseHandle($processHandle) | Out-Null # Use Out-Null to suppress boolean output
-        Write-Host "[TriggerBot] Process handle closed. Exiting." -ForegroundColor Cyan
+        [WinAPI]::CloseHandle($processHandle) | Out-Null
+        Write-Host "[DLL Injector] Uchwyt procesu zamknięty." -ForegroundColor Cyan
     }
 }
+#endregion
 
 # Set console title
-$Host.UI.RawUI.WindowTitle = "CS2 Bots Launcher - Trigger Bot (PowerShell)"
-Write-Host "Starting CS2 Trigger Bot Launcher (PowerShell)..." -ForegroundColor White
+$Host.UI.RawUI.WindowTitle = "CS2 DLL Injector (PowerShell)"
+Write-Host "Uruchamiam CS2 DLL Injector (PowerShell)..." -ForegroundColor White
 Write-Host "------------------------------------------" -ForegroundColor White
 
-# Start the trigger bot
-Start-TriggerBot
+# Start the DLL injector logic
+Start-DLLInjector
 
-Write-Host "`n'END' key pressed. Exiting Trigger Bot." -ForegroundColor Cyan
+Write-Host "`n[DLL Injector] Injector zakończył działanie." -ForegroundColor Cyan
