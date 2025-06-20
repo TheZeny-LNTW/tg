@@ -58,7 +58,8 @@ Add-Type -TypeDefinition @"
             {
                 int errorCode = Marshal.GetLastWin32Error();
                 // This debug line is now enabled to get granular error info from C#
-                Console.WriteLine($"[TriggerBot] DEBUG ERROR: Failed to read memory at 0x{address.ToInt64():X} for '{debugTag}'. Bytes read: {bytesRead}/{size}. Win32 Error: {errorCode}");
+                // Corrected to use string concatenation instead of interpolation for compatibility with Add-Type
+                Console.WriteLine("[TriggerBot] DEBUG ERROR: Failed to read memory at 0x" + address.ToInt64().ToString("X") + " for '" + debugTag + "'. Bytes read: " + bytesRead + "/" + size + ". Win32 Error: " + errorCode);
                 return default(T);
             }
         }
