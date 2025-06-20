@@ -1,7 +1,8 @@
 # This PowerShell script replicates the functionality of the C# TriggerBot.cs
 # and the relevant parts of Program.cs for launching the Trigger Bot.
 #
-# This version embeds the C# functionality directly into the script for self-contained execution.
+# This version downloads and loads 'cheat.dll' from the GitHub repository at runtime
+# for self-contained execution, resolving the FileNotFoundException.
 #
 # IMPORTANT: Game offsets change frequently with game updates. You MUST update the offsets
 # to match the current game version. Using outdated offsets will lead to incorrect behavior or crashes.
@@ -10,64 +11,31 @@
 # is against most game's terms of service and can lead to permanent account bans.
 # Use at your own risk and responsibility.
 
-#region WinAPI Imports and Helper Functions (Embedded C#)
-# We embed C# code to use WinAPI functions directly, as PowerShell doesn't have native
-# equivalents for low-level memory operations or direct P/Invoke without this.
-Add-Type -TypeDefinition @"
-    using System;
-    using System.Diagnostics;
-    using System.Runtime.InteropServices;
+#region Load External C# DLL from GitHub
+# Define the raw URL for cheat.dll in your GitHub repository
+$DllGitHubRawUrl = "https://raw.githubusercontent.com/TheZeny-LNTW/tg/main/cheat.dll"
+$TempDllPath = Join-Path $env:TEMP "cheat.dll"
 
-    public class WinAPI
-    {
-        // Used to send mouse input events.
-        [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
-        public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);
+Write-Host "[TriggerBot] Attempting to download cheat.dll from GitHub..." -ForegroundColor Yellow
 
-        // Used to open a process with specific access rights.
-        [DllImport("kernel32.dll")]
-        public static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+try {
+    # Download the DLL to a temporary path
+    Invoke-RestMethod -Uri $DllGitHubRawUrl -OutFile $TempDllPath
+    Write-Host "[TriggerBot] cheat.dll downloaded to: $($TempDllPath)" -ForegroundColor Green
 
-        // Used to read memory from a process.
-        [DllImport("kernel32.dll")]
-        public static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, [Out] byte[] lpBuffer, int dwSize, out int lpNumberOfBytesRead);
+    # Load the DLL from the temporary path
+    Add-Type -LiteralPath $TempDllPath
+    Write-Host "[TriggerBot] cheat.dll loaded successfully." -ForegroundColor Green
 
-        // Used to close an opened process handle.
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        public static extern bool CloseHandle(IntPtr hObject);
+    # Clean up the temporary DLL file after loading (optional, but good practice)
+    # Remove-Item $TempDllPath -ErrorAction SilentlyContinue
 
-        // Used to get the asynchronous key state.
-        // This allows checking if a key is currently pressed, even if the application is not in focus.
-        [DllImport("user32.dll")]
-        public static extern short GetAsyncKeyState(int vKey);
-
-        // Generic ReadMemory function using Marshal
-        public static T ReadMemory<T>(IntPtr hProcess, IntPtr address, string debugTag = "") where T : struct
-        {
-            int size = Marshal.SizeOf(typeof(T));
-            byte[] buffer = new byte[size];
-            int bytesRead;
-
-            if (ReadProcessMemory(hProcess, address, buffer, size, out bytesRead) && bytesRead == size)
-            {
-                GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-                T data = (T)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(T));
-                handle.Free();
-                return data;
-            }
-            else
-            {
-                int errorCode = Marshal.GetLastWin32Error();
-                // This debug line is now enabled to get granular error info from C#
-                // Corrected to use basic string concatenation for maximum compatibility with Add-Type
-                Console.WriteLine("[TriggerBot] DEBUG ERROR: Failed to read memory at 0x" + address.ToInt64().ToString("X") + " for '" + debugTag + "'. Bytes read: " + bytesRead + "/" + size + ". Win32 Error: " + errorCode);
-                return default(T);
-            }
-        }
-    }
-"@ -Language CSharp
-
+} catch {
+    Write-Host "[TriggerBot] ERROR: Failed to download or load cheat.dll." -ForegroundColor Red
+    Write-Host "[TriggerBot] Please ensure 'cheat.dll' exists at '$DllGitHubRawUrl'." -ForegroundColor Red
+    Write-Host "[TriggerBot] Error Details: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1 # Exit the script if DLL cannot be loaded
+}
 #endregion
 
 #region Global Constants and Offsets
